@@ -233,12 +233,6 @@
   // ---- KPIs ----------------------------------------------------------------
   function kpisForDate(date) {
     var ramps = listRamps(true);
-    var capacity = 0;
-    ramps.forEach(function (r) {
-      rawSlots(r).forEach(function (s) {
-        if (!isPast(date, s.end)) capacity += r.capacity;
-      });
-    });
     var dayBookings = listBookings({ date: date });
     var active = dayBookings.filter(function (b) { return b.status === "bestaetigt" || b.status === "erledigt"; });
     var noShows = dayBookings.filter(function (b) { return b.status === "no_show"; }).length;
