@@ -4,7 +4,9 @@
   "private": true,
   "description": "RampSlot – Rampen-/Zeitfensterbuchung (Dock Appointment Scheduling). Standalone-App in Vanilla-JS, kein Build nötig. jsdom wird nur für den Integrationstest gebraucht.",
   "scripts": {
-    "test": "node test/integration.test.js"
+    "start": "node server/server.js",
+    "test": "node test/integration.test.js",
+    "test:api": "node test/api.test.js"
   },
   "devDependencies": {
     "jsdom": "^29.1.1"
