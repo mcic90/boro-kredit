@@ -133,36 +133,51 @@ create index if not exists blocks_ramp_date_idx on public.blocks (ramp_id, block
 -- ============================================================================
 --  5) DOPPELBUCHUNGSSCHUTZ
 -- ----------------------------------------------------------------------------
---  Es werden ZWEI komplementäre Mechanismen umgesetzt:
+--  Gewählte Lösung: ein kapazitätsbewusster BEFORE INSERT/UPDATE TRIGGER (B).
+--  Er ist die allgemeine Variante, die — anders als ein UNIQUE-Index — auch
+--  Rampen mit capacity > 1 korrekt behandelt (Demo-Rampe r3 hat capacity = 2).
 --
---  (A) Partial UNIQUE INDEX  — schneller, deklarativer Hard-Stop für den
---      häufigsten Fall capacity = 1 (genau eine aktive Buchung je Slot).
---      Greift auf Datenbank-Ebene unabhängig von der App.
+--  Der Trigger zählt bestehende AKTIVE Buchungen am selben
+--  ramp_id/booking_date/start_time und wirft eine EXCEPTION, sobald die
+--  Kapazität der Rampe erreicht ist. Spiegelt activeBookingsAt() +
+--  Kapazitätsprüfung aus store.createBooking().
 --
---  (B) BEFORE INSERT/UPDATE TRIGGER — die allgemeine, kapazitätsbewusste
---      Lösung (auch für capacity > 1). Zählt bestehende aktive Buchungen am
---      selben ramp_id/booking_date/start_time und wirft EXCEPTION, sobald die
---      Kapazität der Rampe erreicht ist. Spiegelt activeBookingsAt()
---      + Kapazitätsprüfung aus store.createBooking().
---
---  "Aktiv" = status IN ('bestaetigt','erledigt) — exakt wie store.js.
+--  "Aktiv" = status IN ('bestaetigt','erledigt') — exakt wie store.js.
 --  Damit blockieren stornierte / no_show-Buchungen den Slot NICHT.
+-- ----------------------------------------------------------------------------
+--  ALTERNATIVE (NICHT aktiv): Wer ausschließlich Rampen mit capacity = 1
+--  betreibt, kann den Trigger weglassen und stattdessen rein deklarativ einen
+--  partiellen UNIQUE-Index einsetzen — schneller, ohne PL/pgSQL:
+--
+--      create unique index bookings_no_double_cap1_idx
+--        on public.bookings (ramp_id, booking_date, start_time)
+--        where status in ('bestaetigt', 'erledigt');
+--
+--  WICHTIG: Ein partieller Index kann NICHT auf ramps.capacity zugreifen und
+--  erzwingt daher Eindeutigkeit für JEDE Rampe — er würde legitime parallele
+--  Buchungen auf capacity>1-Slots fälschlich ablehnen. Deshalb hier bewusst
+--  NICHT verwendet; der Trigger unten ist die korrekte, kapazitätsbewusste
+--  Lösung. (Die beiden Mechanismen NICHT kombinieren.)
 -- ============================================================================
 
--- (A) Partial UNIQUE INDEX für Kapazität 1:
---     Verhindert >1 aktive Buchung auf demselben Slot. Bezieht sich nur auf
---     aktive Buchungen (WHERE-Klausel), damit stornierte Slots wieder frei sind.
---     Hinweis: deckt nur capacity=1 ab; capacity>1 regelt der Trigger (B).
-create unique index if not exists bookings_no_double_cap1_idx
-  on public.bookings (ramp_id, booking_date, start_time)
-  where status in ('bestaetigt', 'erledigt');
-comment on index public.bookings_no_double_cap1_idx is
-  'Hard-Stop gegen Doppelbuchung bei capacity=1 (nur aktive Buchungen). Kapazitaet>1 prueft der Trigger.';
-
--- (B) Kapazitätsbewusster Trigger (allgemein, auch capacity > 1).
+-- Kapazitätsbewusster Trigger (allgemein, auch capacity > 1).
+--
+--   SECURITY DEFINER ist hier ZWINGEND: Die Funktion läuft als Tabellen-Owner
+--   und umgeht damit RLS für die internen Integritäts-Lookups. Würde sie unter
+--   der RLS-Sicht des aufrufenden Lieferanten laufen, dann
+--     (a) fände der Lieferant fremde Buchungen im selben Slot NICHT (bookings-
+--         SELECT-Policy = nur eigene) und könnte einen bereits belegten Slot
+--         überbuchen, und
+--     (b) lieferte der gesperrte Ramp-Lookup keine Zeile (RLS lässt FOR-Locks
+--         auf nicht beschreibbare Zeilen weg) -> jede Lieferanten-Buchung würde
+--         fälschlich mit "Rampe existiert nicht" abbrechen.
+--   Als DEFINER sieht der Trigger ALLE Buchungen/Rampen und prüft die Kapazität
+--   korrekt und einheitlich. search_path fix (Hardening, wie is_admin()).
 create or replace function public.enforce_booking_capacity()
 returns trigger
 language plpgsql
+security definer
+set search_path = public
 as $$
 declare
   v_capacity int;
@@ -174,12 +189,14 @@ begin
     return new;
   end if;
 
-  -- Kapazität der Zielrampe holen (FOR SHARE: stabil gegen parallele Inserts
-  -- auf dieselbe Rampe innerhalb konkurrierender Transaktionen).
+  -- Kapazität der Zielrampe holen. (Kein FOR SHARE: Row-Locks auf Fremdzeilen
+  -- vertragen sich nicht mit RLS-Sichten; die Eindeutigkeit je Slot stellt der
+  -- Trigger ohnehin für JEDE einzelne Zeile sicher. Bei extrem hoher Parallelität
+  -- auf denselben Slot kann zusätzlich der unten dokumentierte UNIQUE-Index
+  -- (capacity=1) oder ein advisory lock ergänzt werden.)
   select capacity into v_capacity
   from public.ramps
-  where id = new.ramp_id
-  for share;
+  where id = new.ramp_id;
 
   if v_capacity is null then
     raise exception 'Rampe % existiert nicht.', new.ramp_id
@@ -187,7 +204,7 @@ begin
   end if;
 
   -- Bereits aktive Buchungen im selben Slot zählen (sich selbst beim UPDATE
-  -- ausnehmen).
+  -- ausnehmen). Dank SECURITY DEFINER werden auch Fremd-Buchungen mitgezählt.
   select count(*) into v_active
   from public.bookings b
   where b.ramp_id      = new.ramp_id
@@ -207,7 +224,7 @@ begin
 end;
 $$;
 comment on function public.enforce_booking_capacity() is
-  'BEFORE INSERT/UPDATE: prueft aktive Buchungen je Slot gegen ramps.capacity, sonst EXCEPTION.';
+  'BEFORE INSERT/UPDATE: prueft aktive Buchungen je Slot gegen ramps.capacity (SECURITY DEFINER -> sieht alle Zeilen, RLS-unabhaengig), sonst EXCEPTION.';
 
 drop trigger if exists bookings_capacity_guard on public.bookings;
 create trigger bookings_capacity_guard
@@ -261,6 +278,19 @@ alter table public.profiles enable row level security;
 alter table public.ramps    enable row level security;
 alter table public.bookings enable row level security;
 alter table public.blocks   enable row level security;
+
+-- Tabellen-GRANTs für die Supabase-Rolle "authenticated".
+--   WICHTIG: RLS filtert ZEILEN, ersetzt aber NICHT die Tabellenrechte. Ohne
+--   GRANT bekäme der Client "permission denied for table ...", BEVOR überhaupt
+--   eine Policy ausgewertet wird. In Supabase werden diese GRANTs i.d.R. per
+--   Default-Privileges automatisch gesetzt; wir setzen sie hier explizit, damit
+--   das Schema eigenständig & reproduzierbar ist (idempotent, harmlos auf
+--   Supabase). Welche ZEILEN/Operationen tatsächlich erlaubt sind, regeln
+--   ausschließlich die Policies darunter. anon erhält bewusst KEINE Rechte.
+grant select, insert, update, delete on public.profiles to authenticated;
+grant select, insert, update, delete on public.ramps    to authenticated;
+grant select, insert, update, delete on public.bookings to authenticated;
+grant select, insert, update, delete on public.blocks   to authenticated;
 
 -- ---- profiles --------------------------------------------------------------
 -- SELECT: eigenes Profil ODER Admin sieht alle.

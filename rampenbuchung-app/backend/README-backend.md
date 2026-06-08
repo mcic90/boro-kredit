@@ -48,8 +48,8 @@ gleich bleibt und nur der **Datenadapter** ausgetauscht wird.
    einfügen und **Run** klicken.
 3. Das Skript legt an:
    - Tabellen `profiles`, `ramps`, `bookings`, `blocks` (Schema `public`),
-   - Doppelbuchungsschutz (partial UNIQUE INDEX für `capacity=1` **und**
-     kapazitätsbewussten `BEFORE INSERT/UPDATE`-Trigger),
+   - Doppelbuchungsschutz (kapazitätsbewusster `BEFORE INSERT/UPDATE`-Trigger;
+     unterstützt auch `capacity > 1`),
    - Hilfsfunktion `is_admin()` (SECURITY DEFINER),
    - **Row Level Security + Policies** für alle vier Tabellen.
 4. Erfolg prüfen: links **Table Editor** → die vier Tabellen müssen sichtbar
@@ -328,7 +328,7 @@ zurück (Strategie A); Rückgabeformen entsprechen `CONTRACT.md`. Beachte das
 
   // --- createBooking(data) -> { ok, booking?, error? } ---
   //     Validierung wie store.js; den FINALEN Kapazitätsschutz erzwingt die DB
-  //     (UNIQUE-Index/Trigger) — dessen Fehler fangen wir ab und melden ihn schön.
+  //     (Trigger enforce_booking_capacity) — dessen Fehler fangen wir ab und melden ihn schön.
   async function createBooking(data){
     var rampRes = await sb().from("ramps").select("*").eq("id", data.rampId).single();
     if (rampRes.error || !rampRes.data) return { ok:false, error:"Rampe nicht gefunden." };
@@ -350,8 +350,9 @@ zurück (Strategie A); Rückgabeformen entsprechen `CONTRACT.md`. Beachte das
     };
     var res = await sb().from("bookings").insert(insert).select().single();
     if (res.error){
-      // 23505 = unique_violation, P0001/23514 = unsere Trigger-EXCEPTION
-      if (res.error.code === "23505" || /ausgebucht|gesperrt/i.test(res.error.message))
+      // 23514 = check_violation (so wirft unser Trigger enforce_booking_capacity);
+      // zur Sicherheit zusätzlich auf die Meldung matchen.
+      if (res.error.code === "23514" || /ausgebucht|gesperrt|Kapazitaet/i.test(res.error.message))
         return { ok:false, error:"Dieses Zeitfenster ist bereits ausgebucht oder gesperrt." };
       return { ok:false, error:res.error.message };
     }
@@ -419,10 +420,12 @@ zurück (Strategie A); Rückgabeformen entsprechen `CONTRACT.md`. Beachte das
   `supplier_id` auf die eigene `auth.uid()` setzen, sonst greift die
   `with check`-Klausel.
 - **Doppelbuchungsschutz ist serverseitig.** Selbst bei gleichzeitigen Klicks
-  zweier Lieferanten verhindert der **partial UNIQUE INDEX** (capacity=1) bzw.
-  der **Trigger** (capacity>1) die Überbuchung. Der Client sollte den DB-Fehler
-  (`23505` bzw. die Trigger-`EXCEPTION`) abfangen und als „bereits ausgebucht"
-  melden — siehe `createBooking` oben.
+  zweier Lieferanten verhindert der **Trigger** `enforce_booking_capacity` die
+  Überbuchung — kapazitätsbewusst, also auch für `capacity > 1` korrekt. Der
+  Client sollte den DB-Fehler (`check_violation`, SQLSTATE `23514`) abfangen und
+  als „bereits ausgebucht" melden — siehe `createBooking` oben. (Wer nur
+  `capacity = 1` fährt, kann alternativ den im Schema dokumentierten partiellen
+  UNIQUE-Index nutzen; beides nicht kombinieren.)
 - **Snapshot-Felder.** `supplier_name`/`email`/`carrier` werden — wie in
   `store.js` — als Kopie in der Buchung gehalten, damit historische Buchungen
   stabil bleiben, auch wenn sich das Profil ändert.

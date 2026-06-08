@@ -174,10 +174,14 @@
     function submit(close) {
       var form = m.el.querySelector("#sup-book-form");
       if (!form) return;
-      var orderRef = (form.orderRef.value || "").trim();
+      var refEl = form.querySelector("#bk-ref");
+      var carrierEl = form.querySelector("#bk-carrier");
+      var qtyEl = form.querySelector("#bk-qty");
+      var notesEl = form.querySelector("#bk-notes");
+      var orderRef = ((refEl && refEl.value) || "").trim();
       if (!orderRef) {
         ui.toast("Bitte eine Bestell-/Referenznummer angeben.", "error");
-        form.orderRef.focus();
+        if (refEl) refEl.focus();
         return;
       }
       var res = store.createBooking({
@@ -187,10 +191,10 @@
         supplierId: user ? user.id : null,
         supplierName: company,
         email: user ? user.email : "",
-        carrier: (form.carrier.value || "").trim() || company,
+        carrier: ((carrierEl && carrierEl.value) || "").trim() || company,
         orderRef: orderRef,
-        qty: form.qty.value,
-        notes: (form.notes.value || "").trim()
+        qty: qtyEl ? qtyEl.value : "",
+        notes: ((notesEl && notesEl.value) || "").trim()
       });
       if (!res.ok) {
         ui.toast(res.error || "Buchung nicht möglich.", "error");
