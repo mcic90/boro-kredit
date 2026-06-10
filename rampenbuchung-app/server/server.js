@@ -226,7 +226,17 @@ http.createServer(function (req, res) {
   var pathname = decodeURIComponent((req.url || "/").split("?")[0]);
   if (pathname.indexOf("/api") === 0) handleApi(req, res, pathname);
   else serveStatic(req, res, pathname);
-}).listen(PORT, function () {
-  console.log("RampSlot Full-Stack-Server läuft auf http://localhost:" + PORT);
+}).listen(PORT, "0.0.0.0", function () {
+  console.log("RampSlot Full-Stack-Server läuft:");
+  console.log("  • Auf diesem PC:      http://localhost:" + PORT);
+  var nets = require("os").networkInterfaces();
+  Object.keys(nets).forEach(function (name) {
+    (nets[name] || []).forEach(function (ni) {
+      if ((ni.family === "IPv4" || ni.family === 4) && !ni.internal) {
+        console.log("  • Im WLAN (Handy):    http://" + ni.address + ":" + PORT);
+      }
+    });
+  });
   console.log("Demo-Login: lieferant@demo.de / demo  ·  admin@demo.de / demo");
+  console.log("(Handy muss im SELBEN WLAN sein; ggf. Firewall für Port " + PORT + " erlauben.)");
 });
